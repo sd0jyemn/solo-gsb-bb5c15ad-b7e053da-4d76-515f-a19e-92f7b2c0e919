@@ -767,3 +767,35 @@ class SourceGapsResponse(BaseModel):
         None, description="Opaque keyset cursor; pass it back verbatim to fetch the next page"
     )
     gaps: list[SourceGapOut]
+
+
+# ---------------------------------------------------------------------------
+# read-only arrival-latency profiling
+# ---------------------------------------------------------------------------
+
+class ArrivalLatencySourceOut(BaseModel):
+    source_id: str
+    sample_count: int = Field(..., description="Number of matching readings for this source")
+    min_latency_seconds: float = Field(
+        ...,
+        description="Minimum first_received_at - observed_at; may be negative",
+    )
+    max_latency_seconds: float = Field(
+        ...,
+        description="Maximum first_received_at - observed_at; may be negative",
+    )
+    avg_latency_seconds: float = Field(
+        ..., description="Arithmetic mean arrival latency; negative samples are retained"
+    )
+
+
+class ArrivalLatencyProfileResponse(BaseModel):
+    session_id: str
+    source_id: Optional[str] = None
+    from_: Optional[str] = Field(
+        None,
+        validation_alias="from",
+        serialization_alias="from",
+    )
+    to: Optional[str] = None
+    sources: list[ArrivalLatencySourceOut]

@@ -43,6 +43,12 @@ buffered 读数按既定全局顺序一次性发布（**尾流发布**）、推�
 的缺口，返回来源、起止读数键与间隔秒数；支持 `source_id`、事件时间闭区间 `from`/`to` 与
 稳定游标分页，全程只读，不影响水位线、告警与检查点。
 
+此外，**到达延迟剖析**接口 `GET /sessions/{session_id}/arrival-latency-profile` 在**同一个
+SQLite 读快照**内筛选 buffered、published、quarantined 读数，按
+`first_received_at - observed_at` 计算每条读数的到达延迟，并逐来源返回样本数、最小值、
+最大值与算术平均值；负延迟照实保留，没有样本的来源不会出现在结果中，结果按 `source_id`
+稳定排序，支持可选 `source_id` 与事件时间闭区间 `from`/`to`。
+
 - 语言/框架：Python 3.11 · FastAPI · Uvicorn
 - 存储：SQLite（WAL 模式，单文件，零外部依赖）
 - 并发：写操作在 `BEGIN IMMEDIATE` 事务内串行化，水位线推进单调、发布只发生一次，
@@ -80,7 +86,7 @@ docker compose up --build
 ```bash
 python3 -m pip install -r requirements.txt
 SENSOR_DB_PATH=./sensors.db uvicorn app.main:app --reload --port 8000
-pytest -q        # 运行 268 个端到端行为测试（需 pytest、httpx）
+pytest -q        # 运行 255 个端到端行为测试（需 pytest、httpx）
 ```
 
 ## 时间线语义
@@ -757,6 +763,69 @@ curl -s 'localhost:8000/sessions/lab-1/source-gaps?max_gap_seconds=30&source_id=
   非法 `from`/`to`、`from` 晚于 `to`、非法 `limit`、空白 `source_id`、未声明来源、
   损坏游标 → 400。
 
+### 22. 到达延迟剖析（只读）
+
+`GET /sessions/{session_id}/arrival-latency-profile?source_id=...&from=...&to=...`
+
+在**同一个 SQLite 读快照**内，对会话中已经接收的读数（`buffered`、`published`、
+`quarantined` 三种状态均参与）计算：
+
+```text
+latency_seconds = first_received_at - observed_at
+```
+
+可选参数：
+
+| 参数 | 必填 | 说明 |
+| --- | --- | --- |
+| `source_id` | 否 | 只统计该来源；须为会话已声明来源，否则 400 |
+| `from` | 否 | 事件时间下界（**含等号**，ISO 8601，统一按 UTC 归一化）；`observed_at >= from` |
+| `to` | 否 | 事件时间上界（**含等号**，同上）；`observed_at <= to`；`from` 晚于 `to` → 400 |
+
+逐来源返回：
+
+- `sample_count`：匹配过滤条件的读数条数；
+- `min_latency_seconds` / `max_latency_seconds`：最小/最大到达延迟；
+- `avg_latency_seconds`：全部样本的**算术平均值**（以微秒整数求和后再除以样本数）。
+
+若接收时刻早于事件时刻（时钟偏差或上报了未来事件时间），延迟为负数；负数会原样参与最小值、
+最大值和平均值，不会被截断为 0。没有任何匹配样本的来源（包括从未上报的已声明来源）不会出现在
+`sources` 中；来源结果按 `source_id` 升序稳定排序。
+
+```bash
+curl -s 'localhost:8000/sessions/lab-1/arrival-latency-profile?from=2026-09-21T10:00:00Z&to=2026-09-21T10:05:00Z'
+```
+
+```json
+{
+  "session_id": "lab-1",
+  "source_id": null,
+  "from": "2026-09-21T10:00:00Z",
+  "to": "2026-09-21T10:05:00Z",
+  "sources": [
+    {
+      "source_id": "thermometer-a",
+      "sample_count": 3,
+      "min_latency_seconds": -0.25,
+      "max_latency_seconds": 1.5,
+      "avg_latency_seconds": 0.75
+    },
+    {
+      "source_id": "thermometer-b",
+      "sample_count": 2,
+      "min_latency_seconds": 0.1,
+      "max_latency_seconds": 0.4,
+      "avg_latency_seconds": 0.25
+    }
+  ]
+}
+```
+
+- **严格只读**：会话/来源校验、过滤与聚合均在同一个 deferred 读事务（单一一致快照）内完成，
+  绝不写库，不影响读数状态、水位线、告警、检查点、封存与隔离结果。
+- 错误码：会话不存在 → 404；非法 `from`/`to`、`from` 晚于 `to`、空白 `source_id`、
+  未声明来源 → 400。
+
 ## 数据库迁移
 
 建表采用“**幂等基础 schema + 版本化迁移**”：应用启动（FastAPI lifespan）时自动创建
@@ -837,6 +906,7 @@ curl -s 'localhost:8000/sessions/lab-1/source-gaps?max_gap_seconds=30&source_id=
 │   ├── retention.py     # 检查点安全清理：dry_run 报告/单事务原子删除 cutoff 之前的已发布与隔离读数
 │   ├── quarantine_audit.py # 隔离影响预演：同一读快照内计算隔离读数插入已发布流的位置/邻居/检查点影响
 │   ├── source_gaps.py   # 来源缺口扫描：同一读快照内按来源找已发布相邻读数的超阈缺口（过滤+游标分页）
+│   ├── arrival_latency.py # 到达延迟剖析：同一读快照内按来源统计 first_received_at - observed_at
 │   ├── errors.py        # 400/404/409/422 业务异常
 │   ├── cursor.py        # 不透明 keyset 分页游标
 │   ├── database.py      # SQLite schema、版本化迁移、连接、BEGIN IMMEDIATE 事务
@@ -848,11 +918,12 @@ curl -s 'localhost:8000/sessions/lab-1/source-gaps?max_gap_seconds=30&source_id=
 │   ├── test_alerts.py       # 单来源告警状态机/滞回/连续次数/隔离/回放/分页测试（27 个）
 │   ├── test_correlated.py   # 跨来源复合/窗口/过期/再触发/隔离/回放/迁移测试（35 个）
 │   ├── test_sealing.py      # 来源封存/幂等冲突/尾流发布/关闭/封存-上报并发测试（25 个）
-│   ├── test_checkpoints.py  # 检查点创建/幂等/409/继续读取分页/不可变/迁移测试（39 个）
-│   ├── test_release_plan.py # 释放计划目标水位线/逐来源推进/封存不可达/422/409/并发只读测试（19 个）
+│   ├── test_checkpoints.py  # 检查点创建/幂等/409/继续读取分页/不可变/迁移测试（31 个）
+│   ├── test_release_plan.py # 释放计划目标水位线/逐来源推进/封存不可达/422/409/并发只读测试（16 个）
 │   ├── test_retention.py    # 检查点安全清理：dry_run/保护边界/原子删除/幂等/不改变既有语义测试（28 个）
-│   ├── test_quarantine_audit.py # 隔离影响预演：插入位置/邻居时间差/检查点影响/过滤/400/只读测试（44 个）
-│   └── test_source_gaps.py # 来源缺口扫描：相邻配对/严格阈值/微秒精度/闭区间/游标分页/400/只读测试（29 个）
+│   ├── test_quarantine_audit.py # 隔离影响预演：插入位置/邻居时间差/检查点影响/过滤/400/只读测试（29 个）
+│   ├── test_source_gaps.py # 来源缺口扫描：相邻配对/严格阈值/微秒精度/闭区间/游标分页/400/只读测试（29 个）
+│   └── test_arrival_latency.py # 到达延迟剖析：状态覆盖/负值/微秒精度/闭区间/来源过滤/400/只读测试（13 个）
 ├── Dockerfile
 ├── docker-compose.yml
 └── requirements.txt

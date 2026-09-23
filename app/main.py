@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from . import (
     alerts,
+    arrival_latency,
     checkpoints,
     correlated,
     quarantine_audit,
@@ -24,6 +25,7 @@ from .models import (
     AlertHistoryResponse,
     AlertRuleOut,
     AlertRulesResponse,
+    ArrivalLatencyProfileResponse,
     CheckpointOut,
     CheckpointStreamResponse,
     CheckpointsResponse,
@@ -61,7 +63,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Lab Sensor Timeline Merge API",
-    version="1.8.0",
+    version="1.9.0",
     description=(
         "Out-of-order sensor reporting with per-session fixed source lists, "
         "a slowest-source watermark (minus allowed lateness), deterministic "
@@ -81,7 +83,10 @@ app = FastAPI(
         "published neighbours and checkpoint it would affect. A read-only "
         "source-gaps endpoint scans per-source adjacent published readings in "
         "one snapshot and reports pairs whose event-time gap strictly exceeds "
-        "a threshold, with inclusive time filters and stable cursor paging."
+        "a threshold, with inclusive time filters and stable cursor paging. A "
+        "read-only arrival-latency endpoint profiles first_received_at minus "
+        "observed_at by source, also in one snapshot and with inclusive time "
+        "filters."
     ),
     lifespan=lifespan,
 )
@@ -343,6 +348,49 @@ def get_source_gaps(
             to=to,
             limit=limit,
             cursor=cursor,
+        )
+    )
+
+
+@app.get(
+    "/sessions/{session_id}/arrival-latency-profile",
+    response_model=ArrivalLatencyProfileResponse,
+    tags=["readings"],
+)
+def get_arrival_latency_profile(
+    session_id: str,
+    source_id: Optional[str] = Query(
+        None, description="Restrict the profile to one declared source of the session"
+    ),
+    from_: Optional[str] = Query(
+        None,
+        alias="from",
+        description="Inclusive event-time lower bound (ISO 8601)",
+    ),
+    to: Optional[str] = Query(
+        None, description="Inclusive event-time upper bound (ISO 8601)"
+    ),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> ArrivalLatencyProfileResponse:
+    """Read-only per-source statistics for reading arrival latency.
+
+    Each matching reading contributes ``first_received_at - observed_at`` in
+    seconds, regardless of whether it is buffered, published or quarantined.
+    Optional ``source_id`` and inclusive ``from``/``to`` filters restrict the
+    event-time window.  For every source with at least one sample the response
+    gives sample count, minimum, maximum and arithmetic mean; negative
+    latencies are preserved and sources with no matching sample are omitted.
+    Groups are ordered by ``source_id``.  The whole profile is computed inside
+    one SQLite read snapshot and never writes.  Invalid parameters return 400;
+    an unknown session returns 404.
+    """
+    return ArrivalLatencyProfileResponse(
+        **arrival_latency.arrival_latency_profile(
+            conn,
+            session_id,
+            source_id=source_id,
+            from_=from_,
+            to=to,
         )
     )
 
