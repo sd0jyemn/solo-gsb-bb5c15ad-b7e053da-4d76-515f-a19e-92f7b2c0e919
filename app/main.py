@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 
 from . import (
     alerts,
+    arrival_latency,
     checkpoints,
     correlated,
     quarantine_audit,
@@ -24,6 +25,7 @@ from .models import (
     AlertHistoryResponse,
     AlertRuleOut,
     AlertRulesResponse,
+    ArrivalLatencyResponse,
     CheckpointOut,
     CheckpointStreamResponse,
     CheckpointsResponse,
@@ -61,7 +63,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Lab Sensor Timeline Merge API",
-    version="1.8.0",
+    version="1.9.0",
     description=(
         "Out-of-order sensor reporting with per-session fixed source lists, "
         "a slowest-source watermark (minus allowed lateness), deterministic "
@@ -81,7 +83,11 @@ app = FastAPI(
         "published neighbours and checkpoint it would affect. A read-only "
         "source-gaps endpoint scans per-source adjacent published readings in "
         "one snapshot and reports pairs whose event-time gap strictly exceeds "
-        "a threshold, with inclusive time filters and stable cursor paging."
+        "a threshold, with inclusive time filters and stable cursor paging. A "
+        "read-only arrival-latency endpoint profiles, in one snapshot, each "
+        "reading's delay (first received at minus event time) with inclusive "
+        "event-time and source filters, returning per-source sample count, "
+        "minimum, maximum and arithmetic mean; negative latencies are kept."
     ),
     lifespan=lifespan,
 )
@@ -282,6 +288,52 @@ async def quarantine_impact_audit(
         limit=body.get("limit"),
     )
     return QuarantineAuditResponse(**result)
+
+
+@app.get(
+    "/sessions/{session_id}/arrival-latency",
+    response_model=ArrivalLatencyResponse,
+    tags=["readings"],
+)
+def get_arrival_latency(
+    session_id: str,
+    source_id: Optional[str] = Query(
+        None, description="Restrict the profile to one declared source of the session"
+    ),
+    from_: Optional[str] = Query(
+        None,
+        alias="from",
+        description="Inclusive event-time lower bound (ISO 8601)",
+    ),
+    to: Optional[str] = Query(
+        None, description="Inclusive event-time upper bound (ISO 8601)"
+    ),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> ArrivalLatencyResponse:
+    """Read-only per-source arrival-latency profile.
+
+    Inside one SQLite read snapshot, every matching reading of the session
+    (buffered, published or quarantined) contributes the latency
+    ``first_received_at - observed_at``.  Optional ``source_id`` and
+    inclusive ``from``/``to`` event-time bounds filter the readings.  For
+    each source that has at least one matching reading the response reports
+    the sample count, minimum, maximum and arithmetic mean latency in
+    seconds; negative latencies are kept as-is and sources with no matching
+    reading are omitted.  Results are ordered by ``source_id``.  The call
+    never writes.  An unknown source or invalid bounds return 400; an
+    unknown session returns 404.
+    """
+    # Every parameter error must be 400 (not FastAPI's default 422), so the
+    # query params are parsed/validated inside the module, like source-gaps.
+    return ArrivalLatencyResponse(
+        **arrival_latency.arrival_latency_profile(
+            conn,
+            session_id,
+            source_id=source_id,
+            from_=from_,
+            to=to,
+        )
+    )
 
 
 @app.get(

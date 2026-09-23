@@ -727,6 +727,54 @@ class RetentionResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# read-only per-source arrival-latency profiling
+# ---------------------------------------------------------------------------
+
+class ArrivalLatencySourceOut(BaseModel):
+    source_id: str
+    sample_count: int = Field(
+        ..., description="Readings of this source matching the filters"
+    )
+    min_latency_seconds: float = Field(
+        ...,
+        description=(
+            "Smallest first_received_at - observed_at of the samples (seconds);"
+            " negative when a reading arrived before its own event time"
+        ),
+    )
+    max_latency_seconds: float = Field(
+        ..., description="Largest first_received_at - observed_at of the samples (seconds)"
+    )
+    avg_latency_seconds: float = Field(
+        ..., description="Arithmetic mean of the per-reading latencies (seconds)"
+    )
+
+
+class ArrivalLatencyResponse(BaseModel):
+    session_id: str
+    source_id: Optional[str] = None
+    from_: Optional[str] = Field(
+        None,
+        validation_alias="from",
+        serialization_alias="from",
+    )
+    to: Optional[str] = None
+    sample_count: int = Field(
+        ...,
+        description=(
+            "Total readings matching the filters across every returned source"
+        ),
+    )
+    sources: list[ArrivalLatencySourceOut] = Field(
+        ...,
+        description=(
+            "Per-source statistics, sorted by source_id; sources without a"
+            " matching reading are absent"
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # read-only per-source gap detection
 # ---------------------------------------------------------------------------
 
